@@ -1,149 +1,315 @@
+import streamlit as st
 import requests
+from bs4 import BeautifulSoup
 from io import BytesIO
-from reportlab.platypus import (
-    SimpleDocTemplate, Table, TableStyle, Paragraph, Image, Spacer, ListFlowable, ListItem
-)
+from datetime import datetime
+import json
+
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, ListFlowable, ListItem
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.enums import TA_LEFT, TA_CENTER
-from datetime import datetime
-from bs4 import BeautifulSoup
-import tempfile
-import os
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.utils import ImageReader
+from reportlab.platypus import Image as RLImage
 
-# --- Brand colors ---
-BRAND_RED = colors.HexColor("#FF0000")
-BRAND_BLUE = colors.HexColor("#00aeef")
-BRAND_BLACK = colors.black
-BRAND_WHITE = colors.white
-
-# --- Temporary folder for images ---
-temp_dir = tempfile.mkdtemp()
-
-def download_image(url):
-    """Download image to temporary folder, return local file path."""
-    try:
-        response = requests.get(url, timeout=5)
-        ext = url.split('.')[-1].split('?')[0]
-        if len(ext) > 4: ext = "jpg"
-        filename = f"img_{int(datetime.now().timestamp()*1000)}.{ext}"
-        filepath = os.path.join(temp_dir, filename)
-        with open(filepath, "wb") as f:
-            f.write(response.content)
-        return filepath
-    except Exception as e:
-        print(f"Failed to download {url}: {e}")
+def get_nested(obj, path):
+    """Simple nested key access with dot notation (supports list indices as digits)."""
+    if not path or obj is None:
         return None
-
-# --- Fetch API data ---
-api_url = "https://accordmedical.co.ke/api/get_spdk_items.php"
-resp = requests.get(api_url)
-data = resp.json()
-
-if data["status"] != "success":
-    raise Exception("Failed to fetch API data")
-
-items = data["data"]
-
-# --- Organize items by category ---
-departments = {}
-for item in items:
-    category = item.get("category", "Other")
-    departments.setdefault(category, []).append(item)
-
-# --- PDF setup ---
-pdf_file = "medical_products_catalog.pdf"
-doc = SimpleDocTemplate(pdf_file, pagesize=A4)
-styles = getSampleStyleSheet()
-
-# Custom styles
-header_style = ParagraphStyle('Header', fontSize=20, alignment=TA_CENTER, textColor=BRAND_RED, spaceAfter=12)
-subtitle_style = ParagraphStyle('Subtitle', fontSize=14, alignment=TA_CENTER, textColor=BRAND_BLACK, spaceAfter=24)
-dept_style = ParagraphStyle('Department', fontSize=16, textColor=BRAND_BLUE, spaceAfter=12)
-end_dept_style = ParagraphStyle('EndDept', fontSize=10, textColor=BRAND_RED, italic=True, spaceAfter=24)
-product_style = ParagraphStyle('Product', fontSize=9, leading=11, alignment=TA_LEFT)
-desc_item_style = ParagraphStyle('DescItem', fontSize=8, leading=10, leftIndent=10, bulletIndent=5)
-
-elements = []
-
-# --- PDF Header ---
-elements.append(Paragraph("ACCORD MEDICAL PRODUCTS CATALOG", header_style))
-elements.append(Paragraph("Product Catalog – Department Listing", subtitle_style))
-
-# --- Loop through departments ---
-downloaded_images = []
-
-for dept_name, products in departments.items():
-    elements.append(Paragraph(dept_name, dept_style))
-    elements.append(Spacer(1, 12))
-
-    table_data = [["Product", "Description", "Image"]]
-
-    for prod in products:
-        # Product name
-        prod_name = Paragraph(prod.get("product_name", ""), product_style)
-
-        # Description as bullet points
-        description_html = prod.get("product_description", "")
-        soup = BeautifulSoup(description_html, "html.parser")
-        bullet_points = []
-        for li in soup.find_all("li"):
-            text = li.get_text(strip=True)
-            bullet_points.append(ListItem(Paragraph(text, desc_item_style)))
-        if bullet_points:
-            desc = ListFlowable(bullet_points, bulletType='bullet', start='•', leftIndent=10)
+    keys = path.split('.')
+    current = obj
+    for key in keys:
+        if key.isdigit() and isinstance(current, list):
+            idx = int(key)
+            if idx < len(current):
+                current = current[idx]
+            else:
+                return None
+        elif isinstance(current, dict):
+            current = current.get(key)
         else:
-            desc_text = soup.get_text(strip=True)
-            desc = Paragraph(desc_text, desc_item_style)
+            return None
+        if current is None:
+            return None
+    return current
 
-        # Image
-        img_url = None
-        if prod.get("images"):
-            img_url = prod["images"][0].get("product_image") or prod["images"][0].get("product_image_md")
+def generate_pdf(
+    items,
+    title,
+    subtitle,
+    primary_color,
+    accent_color,
+    group_key,
+    name_key,
+    desc_key,
+    images_key,
+    product_header,
+    desc_header,
+    image_header,
+    additional
+):
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, leftMargin=40, rightMargin=40, topMargin=60, bottomMargin=60)
+    styles = getSampleStyleSheet()
 
-        if img_url:
-            img_path = download_image(img_url)
-            if img_path:
-                downloaded_images.append(img_path)
+    header_style = ParagraphStyle(
+        name='Header',
+        parent=styles['Heading1'],
+        fontSize=24,
+        alignment=TA_CENTER,
+        textColor=colors.HexColor(primary_color),
+        spaceAfter=20
+    )
+    subtitle_style = ParagraphStyle(
+        name='Subtitle',
+        parent=styles['Heading2'],
+        fontSize=16,
+        alignment=TA_CENTER,
+        textColor=colors.black,
+        spaceAfter=30
+    )
+    dept_style = ParagraphStyle(
+        name='Dept',
+        fontSize=18,
+        textColor=colors.HexColor(accent_color),
+        spaceBefore=20,
+        spaceAfter=12,
+        alignment=TA_LEFT
+    )
+    end_dept_style = ParagraphStyle(
+        name='EndDept',
+        fontSize=10,
+        textColor=colors.HexColor(primary_color),
+        italic=True,
+        alignment=TA_CENTER,
+        spaceAfter=30
+    )
+    product_style = ParagraphStyle(
+        name='Product',
+        fontSize=10,
+        leading=12
+    )
+    desc_item_style = ParagraphStyle(
+        name='DescItem',
+        fontSize=9,
+        leading=11,
+        leftIndent=15
+    )
+
+    elements = []
+    elements.append(Paragraph(title, header_style))
+    elements.append(Paragraph(subtitle, subtitle_style))
+    elements.append(Spacer(1, 20))
+
+    # Organize into groups
+    if group_key:
+        departments = {}
+        for item in items:
+            cat = get_nested(item, group_key)
+            cat_name = str(cat) if cat is not None else "Uncategorized"
+            departments.setdefault(cat_name, []).append(item)
+        groups = list(departments.items())
+    else:
+        groups = [("All Products", items)]
+
+    # Column widths
+    num_extra = len(additional)
+    base_widths = [130, 270, 100]  # Product, Description, Image
+    extra_width = 60 if num_extra > 0 else 0
+    col_widths = base_widths + [extra_width] * num_extra
+
+    for group_name, products in groups:
+        if group_key:
+            elements.append(Paragraph(group_name, dept_style))
+            elements.append(Spacer(1, 10))
+
+        table_data = [[product_header, desc_header, image_header] + [col["header"] for col in additional]]
+
+        for prod in products:
+            # Product name
+            name_val = get_nested(prod, name_key)
+            prod_name = Paragraph(str(name_val or "Unnamed Product"), product_style)
+
+            # Description (supports HTML bullet lists)
+            desc_raw = get_nested(prod, desc_key)
+            if desc_raw:
+                desc_str = str(desc_raw)
+                soup = BeautifulSoup(desc_str, "html.parser")
+                li_tags = soup.find_all("li")
+                if li_tags:
+                    bullet_items = [
+                        ListItem(Paragraph(tag.get_text(strip=True), desc_item_style))
+                        for tag in li_tags if tag.get_text(strip=True)
+                    ]
+                    desc = ListFlowable(bullet_items, bulletType="bullet", leftIndent=10) if bullet_items else Paragraph("No description", desc_item_style)
+                else:
+                    clean_text = soup.get_text(separator=" ", strip=True)
+                    desc = Paragraph(clean_text or "No description", desc_item_style)
+            else:
+                desc = Paragraph("No description", desc_item_style)
+
+            # Image
+            images_val = get_nested(prod, images_key)
+            img_url = None
+            if isinstance(images_val, list) and images_val:
+                first = images_val[0]
+                if isinstance(first, dict):
+                    img_url = (first.get("product_image") or
+                               first.get("product_image_md") or
+                               first.get("image") or
+                               first.get("src") or
+                               first.get("url"))
+                elif isinstance(first, str):
+                    img_url = first
+            elif isinstance(images_val, str):
+                img_url = images_val
+
+            img_io = None
+            if img_url and str(img_url).startswith(("http://", "https://")):
                 try:
-                    img_obj = Image(img_path, width=80, height=80)
+                    r = requests.get(img_url, timeout=10)
+                    r.raise_for_status()
+                    img_io = BytesIO(r.content)
                 except:
-                    img_obj = Paragraph("No Image", product_style)
+                    pass
+
+            if img_io:
+                try:
+                    img_obj = RLImage(ImageReader(img_io), width=90, height=90)
+                    img_obj.hAlign = "CENTER"
+                except:
+                    img_obj = Paragraph("Image failed to load", product_style)
             else:
                 img_obj = Paragraph("No Image", product_style)
-        else:
-            img_obj = Paragraph("No Image", product_style)
 
-        table_data.append([prod_name, desc, img_obj])
+            # Additional columns
+            extra_cells = [
+                Paragraph(str(get_nested(prod, col["key"]) or "-"), product_style)
+                for col in additional
+            ]
 
-    table = Table(table_data, colWidths=[120, 250, 100], repeatRows=1)
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), BRAND_BLUE),
-        ('TEXTCOLOR', (0,0), (-1,0), BRAND_WHITE),
-        ('GRID', (0,0), (-1,-1), 0.5, BRAND_BLACK),
-        ('VALIGN', (0,0), (-1,-1), 'TOP'),
-        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0,0), (-1,-1), 9),
-    ]))
+            table_data.append([prod_name, desc, img_obj] + extra_cells)
 
-    elements.append(table)
-    elements.append(Spacer(1, 12))
-    elements.append(Paragraph(f"End of {dept_name}", end_dept_style))
-    elements.append(Spacer(1, 24))
+        if len(table_data) > 1:
+            table = Table(table_data, colWidths=col_widths, repeatRows=1)
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor(accent_color)),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('ALIGN', (2, 1), (2, -1), 'CENTER'),  # Center images
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+            ]))
+            elements.append(table)
+            elements.append(Spacer(1, 30))
 
-# --- Footer ---
-date_text = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-footer = Paragraph(f"Generated on: {date_text} | System: Catalog PDF Generator", styles["Normal"])
-elements.append(footer)
+            if group_key:
+                elements.append(Paragraph(f"End of {group_name} Department", end_dept_style))
 
-# --- Build PDF ---
-doc.build(elements)
+    # Footer
+    elements.append(Spacer(1, 20))
+    elements.append(Paragraph(f"Generated on {datetime.now().strftime('%d %B %Y at %H:%M')}", styles["Normal"]))
 
-print(f"PDF generated successfully: {pdf_file}")
+    doc.build(elements)
+    return buffer.getvalue()
 
-# --- Cleanup temporary images ---
-for f in downloaded_images:
-    if os.path.exists(f):
-        os.remove(f)
-os.rmdir(temp_dir)
+# ====================== Streamlit App ======================
+
+st.set_page_config(page_title="API to PDF Catalog Generator", layout="centered")
+st.title("PDF Catalog Generator")
+st.write("Turn a JSON API of products into a beautiful, branded PDF catalog. Fully configurable via the form below.")
+
+with st.form("catalog_form"):
+    st.subheader("General Settings")
+    api_url = st.text_input("API Endpoint URL", value="https://accordmedical.co.ke/api/get_spdk_items.php")
+    title = st.text_input("Catalog Title", value="ACCORD MEDICAL PRODUCTS CATALOG")
+    subtitle = st.text_input("Catalog Subtitle", value="Product Catalog – Department Listing")
+    pdf_filename = st.text_input("Output PDF Filename", value="medical_products_catalog.pdf")
+
+    col1, col2 = st.columns(2)
+    primary_color = col1.color_picker("Primary Brand Color (titles)", "#FF0000")
+    accent_color = col2.color_picker("Accent Brand Color (tables/departments)", "#00aeef")
+
+    st.subheader("Data Mapping")
+    group_key = st.text_input("Group by key (leave blank for no departments)", value="category")
+    name_key = st.text_input("Product name key", value="product_name")
+    desc_key = st.text_input("Description key (HTML bullet lists supported)", value="product_description")
+    images_key = st.text_input("Images key (list of dicts or URLs)", value="images")
+
+    col1, col2, col3 = st.columns(3)
+    product_header = col1.text_input("Product column header", value="Product")
+    desc_header = col2.text_input("Description column header", value="Description")
+    image_header = col3.text_input("Image column header", value="Image")
+
+    st.subheader("Additional Columns (optional)")
+    st.write("JSON array of objects with `header` and `key`. Example:")
+    st.code('''[
+  {"header": "Price", "key": "price"},
+  {"header": "Code", "key": "product_code"}
+]''')
+    additional_json = st.text_area("Additional columns JSON", value="[]", height=150)
+
+    submitted = st.form_submit_button("Generate PDF Catalog")
+
+if submitted:
+    # Validate additional columns
+    try:
+        additional = json.loads(additional_json)
+        if not isinstance(additional, list):
+            raise ValueError("Must be a JSON array")
+        for col in additional:
+            if not isinstance(col, dict) or "header" not in col or "key" not in col:
+                raise ValueError("Each item must have 'header' and 'key'")
+    except Exception as e:
+        st.error(f"Invalid JSON for additional columns: {e}")
+        st.stop()
+
+    with st.spinner("Fetching data and generating PDF (this may take a minute for large catalogs)..."):
+        try:
+            response = requests.get(api_url, timeout=30)
+            response.raise_for_status()
+            api_data = response.json()
+
+            if api_data.get("status") != "success":
+                st.error(f"API returned error: {api_data.get('message', 'Unknown error')}")
+                st.stop()
+
+            items = api_data.get("data", [])
+            if not items:
+                st.warning("No items found in API response.")
+                st.stop()
+
+            st.info(f"Fetched {len(items)} products from API.")
+
+            pdf_bytes = generate_pdf(
+                items=items,
+                title=title,
+                subtitle=subtitle,
+                primary_color=primary_color,
+                accent_color=accent_color,
+                group_key=group_key or None,
+                name_key=name_key,
+                desc_key=desc_key,
+                images_key=images_key,
+                product_header=product_header,
+                desc_header=desc_header,
+                image_header=image_header,
+                additional=additional
+            )
+
+            st.success("PDF catalog generated successfully!")
+            st.download_button(
+                label="📄 Download PDF Catalog",
+                data=pdf_bytes,
+                file_name=pdf_filename,
+                mime="application/pdf"
+            )
+
+        except requests.exceptions.RequestException as e:
+            st.error(f"Failed to fetch from API: {e}")
+        except Exception as e:
+            st.error(f"Error during generation: {e}")
